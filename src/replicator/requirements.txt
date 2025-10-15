@@ -1,0 +1,9 @@
+blake3==1.0.4
+grpcio==1.67.1
+humanize==4.11.0
+prometheus_client==0.21.1
+protobuf==5.29.5
+PyYAML==6.0.2
+pyzmq==26.2.0
+tensorstore==0.1.67
+watchdog==5.0.3
