@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM python:3.12.12-slim-bookworm@sha256:78e702aee4d693e769430f0d7b4f4858d8ea3f1118dc3f57fee3f757d0ca64b1
+FROM python:3.12.12-slim-bookworm@sha256:2db3d54b851289c3fdf380af6c3eb0db09b072060151fb344de80673e1b26f81
 
 RUN apt update && apt upgrade -y
 RUN apt install --fix-missing -y nfs-client host procps
