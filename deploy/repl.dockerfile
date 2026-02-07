@@ -14,8 +14,8 @@
 
 FROM python:3.12.12-slim-trixie@sha256:590cad70271b6c1795c6a11fb5c110efca593adbd0d4883cd19c36df6a56467b
 
-RUN apt update && apt upgrade -y
-RUN apt install --fix-missing -y nfs-client host procps
+RUN apt-get update && apt-get upgrade -y && apt-get install -y openssl bind9
+RUN apt-get install --fix-missing -y nfs-client host procps
 
 EXPOSE 4242
 
@@ -25,7 +25,7 @@ WORKDIR /app
 RUN mkdir local repl backup
 
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY rpc/*.py rpc/
 COPY platform_api/*.py platform_api/
