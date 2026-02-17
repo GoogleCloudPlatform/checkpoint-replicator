@@ -18,6 +18,7 @@ import logging.handlers
 import os
 import shutil
 import sys
+import time
 
 import file_naming
 import yaml
@@ -141,7 +142,7 @@ def file_digest(path):
     return hash, file_size
 
 
-def delete_file_or_dir(path):
+def delete_file_or_dir(path, max_tries=1):
     if not os.path.lexists(path):
         logging.info(f"Nothing to delete: {path}")
         return
@@ -152,7 +153,18 @@ def delete_file_or_dir(path):
 
     logging.info(f"Deleting {kind} {path}")
     if kind == "dir":
-        shutil.rmtree(path)
+        tries = 0
+        done = False
+        while not done and tries < max_tries:
+            tries += 1
+            try:
+                shutil.rmtree(path)
+                done = True
+            except OSError as e:
+                logging.info(f'delete dir failed, retrying: {e}')
+                time.sleep(0.5)
+        if not done:
+            raise Exception(f'tried {tries} times, failing')
     else:
         os.unlink(path)
 
