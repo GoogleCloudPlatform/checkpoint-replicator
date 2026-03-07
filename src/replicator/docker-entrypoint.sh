@@ -26,7 +26,7 @@ function log_local_storage() {
     mount
 
     echo State of local volume at $local_volume:
-    ls -lh "$local_volume"
+    ls -goh "$local_volume"
 
     echo Disk usage by dirs on $local_volume:
     du -h --max-depth=1 "$local_volume"

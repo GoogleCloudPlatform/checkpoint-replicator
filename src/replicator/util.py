@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import concurrent.futures
+import copy
 import logging
 import logging.handlers
 import os
@@ -45,11 +46,24 @@ def init_logging():
     set_extra_logging_info("init")
 
 
+class MultiLineStreamHandler(logging.StreamHandler):
+    def emit(self, record):
+        msg = record.getMessage()
+        if '\n' not in msg:
+            super().emit(record)
+        else:
+            rec = copy.copy(record)
+            rec.args = None
+            for line in msg.splitlines():
+                rec.msg = line
+                super().emit(rec)
+
+
 def set_extra_logging_info(extra_info: str = ""):
     # need to reset first for basicConfig to have any effect
     logging.getLogger().handlers.clear()
 
-    consoleHandler = logging.StreamHandler(sys.stdout)
+    consoleHandler = MultiLineStreamHandler(sys.stdout)
     # DEBUG-level traces from watchdog package are too noisy, so filter them out
     consoleHandler.addFilter(lambda record: not record.name.startswith("watchdog."))
 

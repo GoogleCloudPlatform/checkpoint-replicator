@@ -217,7 +217,7 @@ def garbage_collect_local_storage(config, keep_steps: set[int], *, keep_node_ran
         f"Garbage collecting local storage, keeping steps {keep_steps}, node ranks to keep are limited to {keep_node_rank}")
 
     listing = subprocess.run(
-        ["ls", "-lh", Volume.Local.value],
+        ["ls", "-goh", Volume.Local.value],
         capture_output=True,
         text=True,
         check=False
@@ -264,7 +264,7 @@ def garbage_collect_local_storage(config, keep_steps: set[int], *, keep_node_ran
             logging.info(f"Deleted {data_file}")
 
     listing = subprocess.run(
-        ["ls", "-lh", Volume.Local.value],
+        ["ls", "-goh", Volume.Local.value],
         capture_output=True,
         text=True,
         check=False
