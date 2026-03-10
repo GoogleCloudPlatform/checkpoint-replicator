@@ -239,10 +239,12 @@ def garbage_collect_local_storage(config, keep_steps: set[int], *, keep_node_ran
             step = None
             node = None
 
-        if step is not None and (step in keep_steps) \
-           and (keep_node_rank is None or node == keep_node_rank):
-            keep_meta.add(meta_file)
-            logging.info(f"Keeping meta {meta_file}")
+        if step is not None and (step in keep_steps):
+            if keep_node_rank is None or node == keep_node_rank:
+                keep_meta.add(meta_file)
+                logging.info(f"Keeping meta and data for {meta_file}")
+            else:
+                logging.info(f"Keeping meta only for {meta_file}")
         else:
             os.unlink(meta_file)
             logging.info(f"Deleted {meta_file}")
