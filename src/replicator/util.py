@@ -128,8 +128,9 @@ def read_config(file_name):
 
 
 def delete_config():
-    os.remove(_config_file)
-    logging.info(f"Deleted config file: {_config_file}")
+    if _config_file:
+        os.remove(_config_file)
+        logging.info(f"Deleted config file: {_config_file}")
 
 
 def file_digest(path):

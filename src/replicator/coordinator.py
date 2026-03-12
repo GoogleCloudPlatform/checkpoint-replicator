@@ -40,14 +40,15 @@ class ZMQAsyncServer:
         client_id = self.socket.recv()
         assert (len(self.socket.recv()) == 0)  # skip the empty frame
         req = self.socket.recv_json()
-        node_rank = req.get("node-rank")
-        logging.debug(f"Received request from {f'Node={node_rank}, ' if node_rank is not None else ''}client_id={client_id.hex()}:\n{pprint.pformat(req, width=120, compact=True)}")
-
         if not isinstance(req, dict):
             logging.error(f"Received unexpected message: {req}")
             self.respond_to(client_id, {"error": "Expected JSON dictionary request"})
             return client_id, None
-        elif (rec_req := req.get("request")) != req_type:
+
+        node_rank = req.get("node-rank")
+        logging.debug(f"Received request from {f'Node={node_rank}, ' if node_rank is not None else ''}client_id={client_id.hex()}:\n{pprint.pformat(req, width=120, compact=True)}")
+
+        if (rec_req := req.get("request")) != req_type:
             logging.error(f"Received unexpected request type '{rec_req}' instead of '{req_type}' from Node {node_rank}")
             self.respond_to(client_id, {"error": f"Expected '{req_type}' request, got '{rec_req}'"})
             return client_id, None
@@ -128,17 +129,17 @@ class RestoreDB:
 
         # NodeRank -> zmq clientID mapping
         # Only used if we respond in stages, to reply to individual nodes
-        self.node_rank_to_client_id = None
+        self.node_rank_to_client_id: dict[int, str] = {}
 
         # This is a 3-dimensional dictionary:
         # StepNumber -> NodeRank -> Worker/GPUNumber -> DataHash string
-        self.global_meta = None
+        self.global_meta: defaultdict[int, defaultdict[int, dict[int, str]]] = defaultdict(lambda: defaultdict(dict))
 
         # This is just a flat set of available data file hashes
-        self.global_data = None
+        self.global_data: set[str] = set()
 
         # checkpoint step number we are restoring from
-        self.restore_cp = None
+        self.restore_cp: int | None = None
 
         # backup name we are restoring from, or None if we are not restoring from backup
         self.restore_backup_name = None
@@ -147,7 +148,7 @@ class RestoreDB:
         self.hash_to_node_ranks = None
 
     def build_global_state_from_requests(self):
-        self.global_meta = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+        self.global_meta = defaultdict(self.global_meta.default_factory)
         self.global_data = set()
 
         # build global view of all available data received from all nodes
@@ -167,7 +168,7 @@ class RestoreDB:
     def load_global_state_from_backup(self, backup_name: str):
         logging.info(f"Considering backup: {backup_name}")
 
-        backup_meta = defaultdict(lambda: defaultdict(lambda: defaultdict(dict)))
+        backup_meta = defaultdict(self.global_meta.default_factory)
         backup_data = set()
 
         backup_path = Path(Volume.Backup.value, backup_name)
@@ -183,6 +184,72 @@ class RestoreDB:
 
         self.global_meta = backup_meta
         self.global_data = backup_data
+
+
+    def infer_missing_meta(self, step: int):
+        dp_partitions = self.config.get("assume-data-parallelism")
+        if not dp_partitions or dp_partitions <= 1:
+            logging.info("No .meta inference if no data parallelism, or only one group")
+            return
+
+        node_count = self.config["nodes"]
+        if (node_count % dp_partitions) != 0:
+            logging.error(f"Number of Nodes {node_count} is not divisible by assume-data-parallelism {dp_partitions} = {node_count / dp_partitions}")
+            return
+
+        dp_partition_size = node_count // dp_partitions
+        step_meta = self.global_meta[step]
+
+        # Conceptually we map the flat 1D list of NodeRanks onto a 2D grid:
+        # * Rows represent data-parallel replicas (partitions)
+        # * Columns represent equivalent nodes across those replicas that share the same data
+        #
+        # For each column, all defined metadata values must be identical.
+        # If a node's metadata is missing (None), it can be inferred from other nodes in the same column.
+        # To succeed, at least one node in the column must have valid metadata to infer from.
+
+        # First iterate over columns
+        for col in range(dp_partition_size):
+            # this is a dict[worker] -> hash, but we treat it as a unit
+            # because dict comparison for equality works for our case
+            column_hashes = None
+
+            # node ranks that need to be inferred
+            infer_ranks = []
+
+            # Now iterate over rows
+            for row in range(dp_partitions):
+                node_rank = row * dp_partition_size + col
+                node_hashes = step_meta.get(node_rank)
+
+                if node_hashes is None:
+                    # needs to be inferred
+                    infer_ranks.append(node_rank)
+                elif column_hashes is None:
+                    # first defined value for this column
+                    column_hashes = node_hashes
+                elif node_hashes != column_hashes:
+                    logging.error(f"Conflicting meta for step={step}, column={col}, row={row}, node_rank={node_rank} "
+                                  f"is set to {node_hashes}, but previous row(s) were set to {column_hashes}")
+                    # this column cannot be inferred, but maybe all values are set and no inference is required,
+                    # so break will proceed to the next column.
+                    # THIS IS STILL AN ERROR, as data parallelism assumption is not satisfied
+                    # but we'll try to proceed anyway, break will proceed to the next column
+                    break
+            else: # this is for/else block, only executed if for loop did not break and finished normally
+                if infer_ranks:
+                    if column_hashes is None:
+                        logging.warning(f"Cannot infer missing meta for step={step}, entire column={col}, nodes={infer_ranks}")
+                        # there is no point in continuing inference for this entire step, as validation will fail later anyway,
+                        # but if other "smarts" are added in the future, this may need to be replaced with else
+                        return
+
+                    # infer hashes for nodes missing meta
+                    for node_rank in infer_ranks:
+                        step_meta[node_rank] = column_hashes.copy()
+
+                    logging.info(f"Inferred missing meta for step={step} column={col} for nodes {infer_ranks} to be {column_hashes}")
+
 
     def validate_checkpoint(self, step: int) -> bool:
         step_meta = self.global_meta[step]
@@ -288,6 +355,7 @@ class Coordinator(object):
             # look for in-cluster checkpoint
             restore_db.build_global_state_from_requests()
             for step in sorted(restore_db.global_meta.keys(), reverse=True):
+                restore_db.infer_missing_meta(step)
                 if restore_db.validate_checkpoint(step):
                     best_cp = step
                     break
@@ -306,6 +374,7 @@ class Coordinator(object):
                 restore_db.load_global_state_from_backup(backup)
                 # normally backup should have only one step
                 for step in sorted(restore_db.global_meta.keys(), reverse=True):
+                    restore_db.infer_missing_meta(step)
                     if restore_db.validate_checkpoint(step):
                         best_cp = step
                         backup_name = backup
@@ -569,7 +638,7 @@ class Coordinator(object):
             }
 
             now = time.time()
-            if (now - last_backup) >= backup_interval or (DEBUG_BACKUP and cur_step % 2):
+            if (now - last_backup) >= backup_interval or (DEBUG_BACKUP and cur_step is not None and cur_step % 2):
                 nodes_running_backup = set()
                 for req in requests.values():
                     if req["backup-running"]:
