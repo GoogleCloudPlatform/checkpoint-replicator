@@ -366,6 +366,7 @@ class Coordinator(object):
             if backup_name:
                 logging.warning(f"Restoring from forced backup '{backup_name}'")
                 backup_list = [backup_name]
+                backup_name = None # reset it in case it's invalid
             else:
                 logging.warning("No valid checkpoints found in the cluster, trying backups")
                 backup_list = get_backup_list()
