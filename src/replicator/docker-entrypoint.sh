@@ -68,12 +68,30 @@ trap stop TERM EXIT INT QUIT
 mkdir -p /home/prometheus_multiprocess
 export PROMETHEUS_MULTIPROC_DIR=/home/prometheus_multiprocess
 
-echo Replicator Starting ...
-log_local_storage
+# Allowing up to 10 local restarts ensures the Kubernetes pod stays running for at least
+# 10 minutes even if Replicator restarts once per minute.
+# This prevents Kubernetes from declaring the container unhealthy and triggering a CrashLoopBackOff,
+# which introduces restart delay of up to 5 minutes.
+for i in {1..10}; do
+  echo Replicator Starting ...
+  log_local_storage
 
-if [ -f "replicator.ver" ]; then
-  echo -n "Replicator version: "
-  cat replicator.ver
-fi
+  if [ -f "replicator.ver" ]; then
+    echo -n "Replicator version: "
+    cat replicator.ver
+  fi
 
-python3 repl.py
+  set +e
+  python3 repl.py
+  exit_code=$?
+  set -e
+
+  echo "Replicator Exited with code $exit_code"
+
+  # kill all forked processes
+  pkill -9 python3 || true
+
+  sleep 1
+done
+
+echo "Exhausted local restarts"
