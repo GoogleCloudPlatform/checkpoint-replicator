@@ -38,19 +38,22 @@ class ZMQAsyncServer:
 
     def recv_request(self, req_type):
         client_id = self.socket.recv()
-        assert (len(self.socket.recv()) == 0)  # skip the empty frame
+        empty_frame = self.socket.recv()  # skip the empty frame
+        assert len(empty_frame) == 0, f"Expected empty frame after client ID, got {empty_frame}"
         req = self.socket.recv_json()
         if not isinstance(req, dict):
-            logging.error(f"Received unexpected message: {req}")
-            self.respond_to(client_id, {"error": "Expected JSON dictionary request"})
+            self.respond_with_error(client_id, f"Expected JSON dictionary request, received unexpected message: {req}")
             return client_id, None
 
         node_rank = req.get("node-rank")
         logging.debug(f"Received request from {f'Node={node_rank}, ' if node_rank is not None else ''}client_id={client_id.hex()}:\n{pprint.pformat(req, width=120, compact=True)}")
 
+        if not isinstance(node_rank, int) or node_rank < 0:
+            self.respond_with_error(client_id, f"Missing or invalid 'node-rank' in request: '{node_rank}'")
+            return client_id, None
+
         if (rec_req := req.get("request")) != req_type:
-            logging.error(f"Received unexpected request type '{rec_req}' instead of '{req_type}' from Node {node_rank}")
-            self.respond_to(client_id, {"error": f"Expected '{req_type}' request, got '{rec_req}'"})
+            self.respond_with_error(client_id, f"Expected request type '{req_type}', got '{rec_req}' from Node '{node_rank}'")
             return client_id, None
 
         return client_id, req
@@ -61,15 +64,35 @@ class ZMQAsyncServer:
         self.socket.send(b"", zmq.SNDMORE)
         self.socket.send_json(response)
 
+    def respond_with_error(self, client_id: bytes, err_msg: str) -> None:
+        logging.error(err_msg)
+        self.respond_to(client_id, {"error": err_msg})
+
     def gather_requests(self, req_type, N):
         requests = {}
+        node_to_client_id = {}
         logging.info(f"Collecting '{req_type}' requests from {N} Nodes")
         while len(requests) < N:
             # Receive client id and request
             client_id, req = self.recv_request(req_type)
             # ignore invalid requests
-            if req:
-                requests[client_id] = req
+            if not req:
+                continue
+
+            node_rank = req["node-rank"]
+
+            # node_rank >= 0 is already guaranteed by recv_request
+            if node_rank >= N:
+                self.respond_with_error(client_id, f"Node rank '{node_rank}' is out of bounds (expected less than {N})")
+                continue
+
+            # Keep the newest request
+            if (previous_client_id := node_to_client_id.get(node_rank)) is not None:
+                self.respond_with_error(previous_client_id, f"Received a newer request from Node '{node_rank}' client_id={client_id.hex()}, discarding previous request client_id={previous_client_id.hex()}")
+                del requests[previous_client_id]
+
+            requests[client_id] = req
+            node_to_client_id[node_rank] = client_id
 
         logging.info(f"Received '{req_type}' requests from {len(requests)} Nodes, sample request: {next(iter(requests.values()))}")
         return requests
