@@ -16,6 +16,7 @@ import datetime
 import logging
 import os
 import pprint
+import signal
 import sys
 import time
 import traceback
@@ -323,10 +324,14 @@ class RestoreDB:
         assert self.restore_cp is not None, f"get_node_meta called for node {node_rank} but restore_cp is not set"
         return self.global_meta[self.restore_cp][node_rank]
 
+def _sigterm_as_keyboard_interrupt(signum, frame):
+    raise KeyboardInterrupt(f"Terminated via signal {signum}")
 
 class Coordinator(object):
     def start(self, config, initial_state):
         self.config = config
+        self.coordinator_registered = False
+
         util.set_extra_logging_info(f"job={config['job-name']} coord")
 
         port = config["master-port"]
@@ -335,14 +340,29 @@ class Coordinator(object):
         logging.info(f"Starting Coordinator on {listen_adr}")
         self.socket = ZMQAsyncServer(listen_adr)
         self.registered_adr = f"{transport}://{platform_api.get_my_ip()}:{port}"
-        platform_api.register_coordinator(config["job-name"], self.registered_adr)
 
-        if initial_state == State.RESTORE_ONLY:
-            self.restore()
-        else:
-            if initial_state == State.RESTORE:
+        # Map SIGTERM to KeyboardInterrupt exception, SIGINT already raises KeyboardInterrupt
+        signal.signal(signal.SIGTERM, _sigterm_as_keyboard_interrupt)
+
+        try:
+            self.coordinator_registered = True
+            platform_api.register_coordinator(config["job-name"], self.registered_adr)
+
+            if initial_state == State.RESTORE_ONLY:
                 self.restore()
-            self.sync()
+            else:
+                if initial_state == State.RESTORE:
+                    self.restore()
+                self.sync()
+        except KeyboardInterrupt:
+            logging.info(f"SIGINT/SIGTERM received, coordinator_registered={self.coordinator_registered}")
+            if self.coordinator_registered:
+                platform_api.unregister_coordinator(self.config["job-name"], self.registered_adr)
+            else:
+                logging.info("Coordinator is not registered, nothing to do")
+            # terminate quickly
+            os._exit(0)
+
 
     # Sample request:
     # 'request': 'restore',
@@ -360,6 +380,7 @@ class Coordinator(object):
         requests = self.socket.gather_requests("restore", node_count)
         # at this point all nodes have discovered the coordinator
         platform_api.unregister_coordinator(self.config["job-name"], self.registered_adr)
+        self.coordinator_registered = False
 
         logging.info("Determining best checkpoint to restore from")
 
@@ -825,13 +846,14 @@ class State(Enum):
     RESTORE_ONLY = 3  # debug-only state
 
 
-def init(config, initial_state=State.RESTORE):
+def maybe_start(config, initial_state=State.RESTORE):
     if config["node-rank"] == 0:
         global coordinator_pid
         coordinator_pid = os.fork()
         if coordinator_pid == 0:
             start_server(config, initial_state)
 
+def connect(config):
     context = zmq.Context()
     master = context.socket(zmq.REQ)
     coord_address = platform_api.get_coordinator(config["job-name"])

@@ -45,18 +45,33 @@ def get_my_ip():
 	return ip
 
 
+def _call_grpc_with_yield(rpc_method, request):
+	"""Executes a gRPC method using a polling loop over a future with timeouts.
+
+	Direct synchronous gRPC calls block inside the C-extension layer without yielding
+	control to the Python interpreter during network waits. This helper invokes the
+	RPC asynchronously and polls `future.result(timeout=1)` in a loop, yielding control
+	periodically back to Python so other threads and signal handlers (e.g. SIGINT) can run.
+	"""
+	future = rpc_method.future(request)
+	while True:
+		try:
+			return future.result(timeout=1)
+		except grpc.FutureTimeoutError:
+			pass
+
 def register_coordinator(job_name, ip):
 	_init_stub()
 
 	logging.info(f"Registering coordinator for job '{job_name}' to address '{ip}'")
-	_stub.RegisterCoordinator(replication_data.RegisterCoordinatorRequest(job_name=job_name, ip=ip))
+	_call_grpc_with_yield(_stub.RegisterCoordinator, replication_data.RegisterCoordinatorRequest(job_name=job_name, ip=ip))
 
 
 def get_coordinator(job_name):
 	_init_stub()
 
 	logging.info(f"Getting coordinator for job '{job_name}'")
-	coord = _stub.GetCoordinator(replication_data.GetCoordinatorRequest(job_name=job_name))
+	coord = _call_grpc_with_yield(_stub.GetCoordinator, replication_data.GetCoordinatorRequest(job_name=job_name))
 	ip = coord.ip
 	logging.info(f"Got coordinator address '{ip}'")
 	return ip
@@ -66,32 +81,32 @@ def unregister_coordinator(job_name, ip):
 	_init_stub()
 
 	logging.info(f"Unregistering coordinator for job '{job_name}' with address '{ip}'")
-	_stub.UnregisterCoordinator(replication_data.UnregisterCoordinatorRequest(job_name=job_name, ip=ip))
+	_call_grpc_with_yield(_stub.UnregisterCoordinator, replication_data.UnregisterCoordinatorRequest(job_name=job_name, ip=ip))
 
 
 def set_replication_peer(local_mountpoint, target_ip):
 	_init_stub()
 
 	logging.info(f"Setting replication peer for mountpoint '{local_mountpoint}' to address '{target_ip}'")
-	_stub.SetReplicationPeer(replication_data.SetReplicationPeerRequest(local_mountpoint=local_mountpoint, target_ip=target_ip))
+	_call_grpc_with_yield(_stub.SetReplicationPeer, replication_data.SetReplicationPeerRequest(local_mountpoint=local_mountpoint, target_ip=target_ip))
 
 
 def unmount_peer(local_mountpoint):
 	_init_stub()
 
 	logging.info(f"Unmounting peer for mountpoint '{local_mountpoint}'")
-	_stub.UnmountPeer(replication_data.UnmountPeerRequest(local_mountpoint=local_mountpoint))
+	_call_grpc_with_yield(_stub.UnmountPeer, replication_data.UnmountPeerRequest(local_mountpoint=local_mountpoint))
 
 
 def unmount_all_peers():
 	_init_stub()
 
 	logging.info(f"Unmounting all peer mountpoints")
-	_stub.UnmountAllPeers(replication_data.UnmountAllPeersRequest())
+	_call_grpc_with_yield(_stub.UnmountAllPeers, replication_data.UnmountAllPeersRequest())
 
 
 def mount_gcs_bucket(gcs_dir):
 	_init_stub()
 
 	logging.info(f"Mounting GCS bucket for GCS dir '{gcs_dir}'")
-	_stub.MountGCSBucket(replication_data.MountGCSBucketRequest(local_mountpoint=gcs_dir))
+	_call_grpc_with_yield(_stub.MountGCSBucket, replication_data.MountGCSBucketRequest(local_mountpoint=gcs_dir))

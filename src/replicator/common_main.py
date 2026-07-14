@@ -47,6 +47,14 @@ def cleanup_storage():
 def _termination_handler(config_file):
     wait_for_file(config_file)
     logging.error(f"New config `{config_file}` detected. Terminating.")
+
+    # save one extra restart
+    try:
+        delete_config_if_empty(config_file)
+    except Exception as e:
+        logging.error(f"Failed to delete empty config file: {e}")
+        # fall thru, we need to terminate anyway
+
     # terminate quickly, as container will restart anyway
     os._exit(0)
 
@@ -92,6 +100,14 @@ def test_gcs_bucket_is_hns_enabled(config):
             # keeping (not cleaning up) the failed GCS dir on-purpose, as another indicator of the failure
 
 
+def delete_config_if_empty(config_file) -> bool:
+    if os.path.getsize(config_file) == 0:
+        logging.error(f"Config file '{config_file}' is empty, deleting it and terminating.")
+        util.delete_file_or_dir(config_file)
+        return True
+    return False
+
+
 def common_main(initial_state: coordinator.State = coordinator.State.RESTORE):
     multiprocessing.set_start_method("forkserver")
     util.init_logging()
@@ -102,9 +118,7 @@ def common_main(initial_state: coordinator.State = coordinator.State.RESTORE):
 
     wait_for_file(config_file)
 
-    if os.path.getsize(config_file) == 0:
-        logging.error(f"Config file '{config_file}' is empty, deleting it and terminating.")
-        util.delete_file_or_dir(config_file)
+    if delete_config_if_empty(config_file):
         # terminate quickly, as container will restart anyway
         os._exit(1)
 
@@ -113,19 +127,17 @@ def common_main(initial_state: coordinator.State = coordinator.State.RESTORE):
 
     platform_api.set_config(config)
     # do as little as possible before this call, as it forks Coordinator process
-    master = coordinator.init(config, initial_state)
+    coordinator.maybe_start(config, initial_state)
 
-    # wait to delete the config file until after we've connected to the
-    # coordinator. If the coordinator is stale, the init will fail and cause
-    # this container to restart. We'll try again only if there's a config file
-    # to read.
+    # wait to delete the config file at least until storage cleanup is done
     util.delete_config()
+    terminate_on_new_config(config_file)
+
+    master = coordinator.connect(config)
 
     with MetricManager().node_operations_latency({"method_name": "MountGcsBucket", "framework": ""}):
         platform_api.mount_gcs_bucket(config["job-name"])
     threading.Thread(target=test_gcs_bucket_is_hns_enabled, args=(config,), daemon=True).start()
-
-    terminate_on_new_config(config_file)
 
     return config, master
 

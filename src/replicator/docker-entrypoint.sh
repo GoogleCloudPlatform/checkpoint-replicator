@@ -89,9 +89,12 @@ for i in {1..10}; do
   echo "Replicator Exited with code $exit_code"
 
   # kill all forked processes
-  pkill -9 python3 || true
-
+  # Let Coordinator unregister itself gracefully
+  pkill -SIGTERM python3 || true
   sleep 1
+
+  # Forcefully kill if still alive
+  pkill -9 python3 || true
 done
 
 echo "Exhausted local restarts"
