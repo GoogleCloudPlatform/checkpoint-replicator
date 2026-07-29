@@ -122,7 +122,16 @@ def common_main(initial_state: coordinator.State = coordinator.State.RESTORE):
         # terminate quickly, as container will restart anyway
         os._exit(1)
 
-    config = util.read_config(config_file)
+    try:
+        config = util.read_config(config_file)
+    except Exception as e:
+        logging.critical(f"Failed to read config file '{config_file}': {e}")
+        util.delete_config()
+        os._exit(2)
+
+    util.set_extra_logging_info(f"job={config['job-name']} node={config['node-rank']}/{config['nodes']}")
+    logging.info(f"Config expanded: {config}")
+
     cleanup_storage()
 
     platform_api.set_config(config)

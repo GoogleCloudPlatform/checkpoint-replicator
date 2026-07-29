@@ -28,4 +28,4 @@ if __name__ == "__main__":
         logging.info(f"Replicator exited normally")
     except Exception as e:
         logging.critical(f"Replicator failed: {traceback.format_exc()}")
-        sys.exit(1)
+        sys.exit(3)

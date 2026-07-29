@@ -114,15 +114,89 @@ def read_config(file_name):
     logging.info(f"Config raw: {config}")
 
     config = expand_env_variables(config) # type: ignore
+    config = validate_and_coerce_config(config)
 
-    # set some defaults and derived params
-    config.setdefault("workers-per-node", 1)
-    config.setdefault("master-port", 4242)
-    if "peers-per-node" not in config:
+    return config
+
+
+def validate_and_coerce_config(config: dict) -> dict:
+    from voluptuous import All, Exclusive, In, Invalid, MultipleInvalid, Optional, PREVENT_EXTRA, Range, Schema
+    from voluptuous.humanize import humanize_error
+
+    def non_empty_str(s):
+        if isinstance(s, str) and s and s.strip() == s:
+            return s
+        raise Invalid("value must be a non-empty string without leading or trailing whitespace")
+
+    def min_int(min_val):
+        return All(int, Range(min=min_val))
+
+    peers_exclusive_msg = "Cannot specify both 'peers-per-node' and 'peer-ranks'"
+
+    config_schema = Schema(All(
+        {
+            "job-name": non_empty_str,
+            "nodes": min_int(1),
+            "node-rank": min_int(0),
+            "backup-interval-minutes": min_int(2),
+            "framework": In(("pytorch", "pytorch.distributed", "orbax")),
+            Exclusive("peers-per-node", "peers", msg=peers_exclusive_msg): min_int(0),
+            Exclusive("peer-ranks", "peers", msg=peers_exclusive_msg): [min_int(0)],
+            Optional("workers-per-node", default=1): min_int(1),
+            Optional("master-port", default=4242): All(int, Range(min=1, max=65535)),
+            Optional("master"): non_empty_str,
+            Optional("assume-data-parallelism"): min_int(1),
+        },
+        apply_config_defaults,
+        validate_config_semantics,
+        required=True
+    ), extra=PREVENT_EXTRA)
+
+    try:
+        return config_schema(config)
+    except MultipleInvalid as e:
+        raise ValueError(humanize_error(config, e))
+
+
+def apply_config_defaults(config: dict) -> dict:
+    # set derived params
+    if "peers-per-node" not in config and "peer-ranks" in config:
         config["peers-per-node"] = len(config["peer-ranks"])
+    return config
 
-    set_extra_logging_info(f"job={config['job-name']} node={config['node-rank']}/{config['nodes']}")
-    logging.info(f"Config expanded: {config}")
+
+def validate_config_semantics(config: dict) -> dict:
+    from voluptuous import Invalid
+
+    nodes = config["nodes"]
+    node_rank = config["node-rank"]
+
+    if not (0 <= node_rank < nodes):
+        raise Invalid(f"Expected 0 <= 'node-rank'={node_rank} < 'nodes'={nodes}", path=["node-rank"])
+
+    if "peers-per-node" not in config and "peer-ranks" not in config:
+        raise Invalid("Must specify either 'peers-per-node' or 'peer-ranks'")
+
+    if "peers-per-node" in config and "peer-ranks" in config and config["peers-per-node"] != len(config["peer-ranks"]):
+        raise Invalid(f"'peers-per-node' ({config['peers-per-node']}) does not match length of 'peer-ranks' ({len(config['peer-ranks'])})")
+
+    if "peer-ranks" in config:
+        seen_ranks = set()
+        for idx, r in enumerate(config["peer-ranks"]):
+            if not (0 <= r < nodes):
+                raise Invalid(f"Expected 0 <= 'peer-rank'={r} < 'nodes'={nodes}", path=["peer-ranks", idx])
+            if r == node_rank:
+                raise Invalid(f"Expected 'peer-rank'={r} != 'node-rank'={node_rank}", path=["peer-ranks", idx])
+            if r in seen_ranks:
+                raise Invalid(f"Duplicate 'peer-rank'={r} in 'peer-ranks'", path=["peer-ranks", idx])
+            seen_ranks.add(r)
+
+    if "assume-data-parallelism" in config:
+        dp = config["assume-data-parallelism"]
+        if not (1 <= dp <= nodes):
+            raise Invalid(f"Expected 1 <= 'assume-data-parallelism'={dp} <= 'nodes'={nodes}", path=["assume-data-parallelism"])
+        elif nodes % dp != 0:
+            raise Invalid(f"Expected 'nodes'={nodes} to be divisible by 'assume-data-parallelism'={dp}", path=["assume-data-parallelism"])
 
     return config
 

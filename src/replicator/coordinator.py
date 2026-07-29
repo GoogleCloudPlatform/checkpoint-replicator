@@ -807,17 +807,17 @@ class Coordinator(object):
         node_count = restore_db.config["nodes"]
         data_parallelism = restore_db.config.get("assume-data-parallelism")
 
+        peers = set()
         if data_parallelism:
             dp_partition = node_count // data_parallelism
-            peers = set()
             for i in range(peers_per_node):
                 # ai is a sequence of -1, 1, -2, 2, ...
                 ai = i // 2 + 1
                 if i % 2 == 0: ai = -ai
                 peers.add((node_rank + ai * dp_partition) % node_count)
-        else:
+        elif peers_per_node > 0:
             # first peer is the closest neighbor
-            peers = {(node_rank ^ 1) % node_count, }
+            peers.add((node_rank ^ 1) % node_count)
 
             # remaining peers are the farthest away on a ring of peers
             dist = node_count // peers_per_node
@@ -834,7 +834,7 @@ def start_server(config, initial_state):
         sys.exit(0)
     except Exception as e:
         logging.critical(f"Coordinator failed: {traceback.format_exc()}")
-        sys.exit(1)
+        sys.exit(4)
 
 
 coordinator_pid = None
