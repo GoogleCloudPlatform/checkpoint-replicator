@@ -132,13 +132,15 @@ def validate_and_coerce_config(config: dict) -> dict:
         return All(int, Range(min=min_val))
 
     peers_exclusive_msg = "Cannot specify both 'peers-per-node' and 'peer-ranks'"
+    backup_exclusive_msg = "Cannot specify both 'backup-interval-minutes' and 'backup-interval-steps'"
 
     config_schema = Schema(All(
         {
             "job-name": non_empty_str,
             "nodes": min_int(1),
             "node-rank": min_int(0),
-            "backup-interval-minutes": min_int(2),
+            Exclusive("backup-interval-minutes", "backup-interval", msg=backup_exclusive_msg): min_int(2),
+            Exclusive("backup-interval-steps", "backup-interval", msg=backup_exclusive_msg): min_int(1),
             "framework": In(("pytorch", "pytorch.distributed", "orbax")),
             Exclusive("peers-per-node", "peers", msg=peers_exclusive_msg): min_int(0),
             Exclusive("peer-ranks", "peers", msg=peers_exclusive_msg): [min_int(0)],
@@ -173,6 +175,9 @@ def validate_config_semantics(config: dict) -> dict:
 
     if not (0 <= node_rank < nodes):
         raise Invalid(f"Expected 0 <= 'node-rank'={node_rank} < 'nodes'={nodes}", path=["node-rank"])
+
+    if "backup-interval-minutes" not in config and "backup-interval-steps" not in config:
+        raise Invalid("Must specify either 'backup-interval-minutes' or 'backup-interval-steps'")
 
     if "peers-per-node" not in config and "peer-ranks" not in config:
         raise Invalid("Must specify either 'peers-per-node' or 'peer-ranks'")

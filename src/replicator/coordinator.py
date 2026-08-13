@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import abc
 import datetime
 import logging
 import os
@@ -326,6 +327,70 @@ class RestoreDB:
 
 def _sigterm_as_keyboard_interrupt(signum, frame):
     raise KeyboardInterrupt(f"Terminated via signal {signum}")
+
+class BackupPolicy(abc.ABC):
+    @abc.abstractmethod
+    def should_backup(self, step: int | None) -> bool:
+        pass
+
+    @abc.abstractmethod
+    def backup_started(self, step: int | None):
+        pass
+
+class TimeBasedBackupPolicy(BackupPolicy):
+    def __init__(self, interval_minutes: int):
+        self.interval_seconds = interval_minutes * 60
+        self.last_backup_time = time.time()
+        logging.info(f"TimeBasedBackupPolicy: created with interval of {interval_minutes} minutes")
+
+    def should_backup(self, step: int | None) -> bool:
+        time_elapsed = time.time() - self.last_backup_time
+        if time_elapsed >= self.interval_seconds:
+            logging.info(
+                f"TimeBasedBackupPolicy: requesting backup as {time_elapsed/60:.1f} minutes "
+                f"have elapsed since last backup (interval is {self.interval_seconds/60} minutes)"
+            )
+            return True
+        return False
+
+    def backup_started(self, step: int | None):
+        self.last_backup_time = time.time()
+        formatted_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.last_backup_time))
+        logging.info(f"TimeBasedBackupPolicy: recorded backup started at {formatted_time}")
+
+class StepBasedBackupPolicy(BackupPolicy):
+    def __init__(self, interval_steps: int):
+        self.interval_steps = interval_steps
+        self.last_backup_step = None
+        logging.info(f"StepBasedBackupPolicy: created with interval of {interval_steps} steps")
+
+    def should_backup(self, step: int | None) -> bool:
+        if step is None:
+            return False
+        if step % self.interval_steps == 0:
+            logging.info(
+                f"StepBasedBackupPolicy: requesting backup as step {step} is "
+                f"divisible by {self.interval_steps}"
+            )
+            return True
+        if self.last_backup_step is not None:
+            steps_elapsed = step - self.last_backup_step
+            if steps_elapsed >= self.interval_steps:
+                logging.info(
+                    f"StepBasedBackupPolicy: requesting backup as {steps_elapsed} steps "
+                    f"have elapsed since last backup at step {self.last_backup_step} "
+                    f"(interval is {self.interval_steps} steps)"
+                )
+                return True
+        else:
+            self.last_backup_step = step
+            logging.info(f"StepBasedBackupPolicy: recorded earliest known step {step}")
+
+        return False
+
+    def backup_started(self, step: int | None):
+        self.last_backup_step = step
+        logging.info(f"StepBasedBackupPolicy: recorded backup started for step {step}")
 
 class Coordinator(object):
     def start(self, config, initial_state):
@@ -653,8 +718,12 @@ class Coordinator(object):
     # "backup-running": false
     def sync(self):
         node_count = self.config["nodes"]  # the number of Nodes we expect
-        backup_interval = self.config["backup-interval-minutes"] * 60
-        last_backup = time.time()
+        backup_interval_minutes = self.config.get("backup-interval-minutes")
+        if backup_interval_minutes:
+            backup_policy = TimeBasedBackupPolicy(backup_interval_minutes)
+        else:
+            backup_interval_steps = self.config.get("backup-interval-steps")
+            backup_policy = StepBasedBackupPolicy(backup_interval_steps)
 
         forced_backup_restore_file = Path(Volume.Backup.value, FORCED_BACKUP_RESTORE_FILE_NAME)
 
@@ -682,8 +751,9 @@ class Coordinator(object):
                 "replicated-step": cur_step
             }
 
-            now = time.time()
-            if (now - last_backup) >= backup_interval or (DEBUG_BACKUP and cur_step is not None and cur_step % 2):
+            trigger_backup = backup_policy.should_backup(cur_step)
+
+            if trigger_backup or (DEBUG_BACKUP and cur_step is not None and cur_step % 2):
                 nodes_running_backup = set()
                 for req in requests.values():
                     if req["backup-running"]:
@@ -691,7 +761,7 @@ class Coordinator(object):
 
                 # request backup if it's empty
                 if not nodes_running_backup:
-                    last_backup = now
+                    backup_policy.backup_started(cur_step)
 
                     utc_now = datetime.datetime.now(datetime.timezone.utc)
                     backup_dir = build_backup_dir(utc_now)
