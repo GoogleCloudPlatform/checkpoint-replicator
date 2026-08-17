@@ -139,7 +139,7 @@ def validate_and_coerce_config(config: dict) -> dict:
             "job-name": non_empty_str,
             "nodes": min_int(1),
             "node-rank": min_int(0),
-            Exclusive("backup-interval-minutes", "backup-interval", msg=backup_exclusive_msg): min_int(2),
+            Exclusive("backup-interval-minutes", "backup-interval", msg=backup_exclusive_msg): min_int(1),
             Exclusive("backup-interval-steps", "backup-interval", msg=backup_exclusive_msg): min_int(1),
             "framework": In(("pytorch", "pytorch.distributed", "orbax")),
             Exclusive("peers-per-node", "peers", msg=peers_exclusive_msg): min_int(0),
