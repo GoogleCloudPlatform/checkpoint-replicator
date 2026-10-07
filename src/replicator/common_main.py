@@ -129,7 +129,7 @@ def common_main(initial_state: coordinator.State = coordinator.State.RESTORE):
         util.delete_config()
         os._exit(2)
 
-    util.set_extra_logging_info(f"job={config['job-name']} node={config['node-rank']}/{config['nodes']}")
+    util.set_log_origin(util.get_node_log_origin(config))
     logging.info(f"Config expanded: {config}")
 
     cleanup_storage()

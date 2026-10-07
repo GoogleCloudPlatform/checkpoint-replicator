@@ -342,12 +342,16 @@ def run(config, master):
     file_notifications = queue.Queue()
     observer = framework.start_file_watcher(config, file_notifications)
 
+    # worker processes don't inherit logging config, so pass the log origin explicitly (b/392150589)
+    node_origin = util.get_node_log_origin(config)
     repl_executor = concurrent.futures.ProcessPoolExecutor(
         initializer=util.init_logging,
+        initargs=(f"{node_origin} repl",),
         max_workers=max(10, config["workers-per-node"]))  # at least 10
 
     backup_executor = concurrent.futures.ProcessPoolExecutor(
         initializer=util.init_logging,
+        initargs=(f"{node_origin} backup",),
         max_workers=max(10, config["workers-per-node"]))  # at least 10
 
     try:

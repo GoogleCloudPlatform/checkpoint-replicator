@@ -397,7 +397,7 @@ class Coordinator(object):
         self.config = config
         self.coordinator_registered = False
 
-        util.set_extra_logging_info(f"job={config['job-name']} coord")
+        util.set_log_origin(f"job={config['job-name']} coord")
 
         port = config["master-port"]
         transport = "tcp"

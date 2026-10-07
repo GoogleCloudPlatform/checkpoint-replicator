@@ -31,7 +31,7 @@ from time_block import TimeBlock
 trace_level_num = logging.INFO
 
 
-def init_logging():
+def init_logging(log_origin: str = "init"):
     global trace_level_num
 
     trace_level_str = os.getenv("LOG_LEVEL", "INFO")
@@ -43,7 +43,7 @@ def init_logging():
 
     print(f"Logging level set to: {logging.getLevelName(trace_level_num)} ({trace_level_num})", flush=True)
 
-    set_extra_logging_info("init")
+    set_log_origin(log_origin)
 
 
 class MultiLineStreamHandler(logging.StreamHandler):
@@ -59,7 +59,12 @@ class MultiLineStreamHandler(logging.StreamHandler):
                 super().emit(rec)
 
 
-def set_extra_logging_info(extra_info: str = ""):
+def get_node_log_origin(config: dict) -> str:
+    """Origin (job, node) included in every log line of this node's processes, e.g. "job=my-job node=0/16"."""
+    return f"job={config['job-name']} node={config['node-rank']}/{config['nodes']}"
+
+
+def set_log_origin(log_origin: str = ""):
     # need to reset first for basicConfig to have any effect
     logging.getLogger().handlers.clear()
 
@@ -75,7 +80,7 @@ def set_extra_logging_info(extra_info: str = ""):
     criticalHandler.setLevel(logging.CRITICAL)
 
     logging.basicConfig(level=trace_level_num,
-                        format=f"%(asctime)s.%(msecs)03d %(process)04X:%(thread)04X {extra_info} [%(levelname)-3.3s] %(module)s.%(funcName)s(%(lineno)d): %(message)s",
+                        format=f"%(asctime)s.%(msecs)03d %(process)04X:%(thread)04X {log_origin} [%(levelname)-3.3s] %(module)s.%(funcName)s(%(lineno)d): %(message)s",
                         datefmt="%Y-%m-%d %H:%M:%S",
                         handlers=[consoleHandler, errorHandler, criticalHandler])
 
