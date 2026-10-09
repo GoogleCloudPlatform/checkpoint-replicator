@@ -64,6 +64,37 @@ def get_node_log_origin(config: dict) -> str:
     return f"job={config['job-name']} node={config['node-rank']}/{config['nodes']}"
 
 
+def new_coordinator_request(config: dict, request_type: str) -> dict:
+    """Fields common to every Node -> Coordinator request.
+
+    'generation' is only included if it's set in config, Coordinator uses it to reject
+    requests from Nodes of a different job generation.
+    """
+    req = {
+        "request": request_type,
+        "node-rank": config["node-rank"],
+    }
+    if (generation := config.get("generation")) is not None:
+        req["generation"] = generation
+    return req
+
+
+def send_coordinator_request(master, req: dict) -> dict:
+    """Sends `req` to the Coordinator over the Node's REQ socket `master`, waits for and returns the response.
+
+    Raises RuntimeError if the Coordinator replied with an error instead, e.g. because this Node is from a different
+    job generation, or a newer request from the same Node rank replaced this one. The Node can't continue the
+    protocol after that, so callers let it propagate and the replicator exits.
+    """
+    master.send_json(req)
+    resp = master.recv_json()
+    if not isinstance(resp, dict):
+        raise ValueError(f"Unexpected response from Coordinator to '{req.get('request')}' request: {resp!r}")
+    if (error := resp.get("error")) is not None:
+        raise RuntimeError(f"Coordinator rejected '{req.get('request')}' request: {error}")
+    return resp
+
+
 def set_log_origin(log_origin: str = ""):
     # need to reset first for basicConfig to have any effect
     logging.getLogger().handlers.clear()
@@ -125,7 +156,7 @@ def read_config(file_name):
 
 
 def validate_and_coerce_config(config: dict) -> dict:
-    from voluptuous import All, Exclusive, In, Invalid, MultipleInvalid, Optional, PREVENT_EXTRA, Range, Schema
+    from voluptuous import All, Coerce, Exclusive, In, Invalid, MultipleInvalid, Optional, PREVENT_EXTRA, Range, Schema
     from voluptuous.humanize import humanize_error
 
     def non_empty_str(s):
@@ -153,6 +184,8 @@ def validate_and_coerce_config(config: dict) -> dict:
             Optional("master-port", default=4242): All(int, Range(min=1, max=65535)),
             Optional("master"): non_empty_str,
             Optional("assume-data-parallelism"): min_int(1),
+            # identifies the job generation, Coordinator rejects requests with a different generation
+            Optional("generation"): All(Coerce(str), non_empty_str),
         },
         apply_config_defaults,
         validate_config_semantics,

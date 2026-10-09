@@ -228,8 +228,7 @@ def create_prerestore_file(content : dict):
 def run(config, master):
     local_path = Path(Volume.Local.value)
     req = {
-        "request": "restore",
-        "node-rank": config["node-rank"],
+        **util.new_coordinator_request(config, "restore"),
         "node-ip": platform_api.get_my_ip(),
         "meta-files": list_meta_files(config, local_path),
         "data-files": list_data_files(config, local_path),
@@ -241,9 +240,7 @@ def run(config, master):
 
     with MetricManager().node_operations_latency({"method_name": "CoordinatorRegistration", "framework": ""}):
         logging.info(f"Sending restore request:\n{pprint.pformat(req, width=120, compact=True)}")
-        master.send_json(req)
-
-        resp: dict = master.recv_json()
+        resp = util.send_coordinator_request(master, req)
         logging.info(f"Received restore response:\n{pprint.pformat(resp, width=120, compact=True)}")
 
     restore_step = resp["restore-version"]
@@ -294,19 +291,14 @@ def run(config, master):
             config, restore_step, meta_files, data_sources, backup_src, always_create_meta=restoring_from_backup)
 
     # Reply from Coordinator to restore-done request serves as a barrier before it's OK to run first GC
-    req = {
-        "request": "restore-done",
-        "node-rank": config["node-rank"],
-    }
+    req = util.new_coordinator_request(config, "restore-done")
     # Optimized restore is not supported for multiple workers per node
     if config["workers-per-node"] == 1:
         assert len(meta_files) == 1, "Expected just one meta file"
         req["data-hash"] = meta_files[0][1]  # data hash is the second element in the tuple
 
     logging.info(f"Sending 'restore-done' request:\n{pprint.pformat(req, width=120, compact=True)}")
-    master.send_json(req)
-
-    master.recv_json()  # wait for an empty response
+    util.send_coordinator_request(master, req)  # wait for an empty response
     logging.info("Received 'restore-done' response")
 
     # all restore steps must finish before this point, as creation of the .restore files wakes up training job

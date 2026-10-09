@@ -197,14 +197,12 @@ def wait_for_dest_to_be_ready(config, cur_step, peer_dir):
 
 def wait_for_global_replication(config, master, cur_step, backup_running : bool):
     req = {
-        "request": "sync",
-        "node-rank": config["node-rank"],
+        **util.new_coordinator_request(config, "sync"),
         "replicated-step": cur_step,
         "backup-running": backup_running
     }
     logging.info(f"Sending sync request:\n{pprint.pformat(req, width=120, compact=True)}")
-    master.send_json(req)
-    resp: dict = master.recv_json()
+    resp = util.send_coordinator_request(master, req)
     logging.info(f"Received sync response:\n{pprint.pformat(resp, width=120, compact=True)}")
 
     replicated_step = resp["replicated-step"]
@@ -342,7 +340,7 @@ def run(config, master):
     file_notifications = queue.Queue()
     observer = framework.start_file_watcher(config, file_notifications)
 
-    # worker processes don't inherit logging config, so pass the log origin explicitly (b/392150589)
+    # worker processes don't inherit logging config, so pass the log origin explicitly
     node_origin = util.get_node_log_origin(config)
     repl_executor = concurrent.futures.ProcessPoolExecutor(
         initializer=util.init_logging,

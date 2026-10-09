@@ -33,7 +33,9 @@ from restore import list_data_files, list_meta_files
 
 
 class ZMQAsyncServer:
-    def __init__(self, address):
+    def __init__(self, address, generation: str | None = None):
+        # if set, requests with a different (or missing) generation are rejected
+        self.generation = generation
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.ROUTER)
         self.socket.bind(address)
@@ -52,6 +54,12 @@ class ZMQAsyncServer:
 
         if not isinstance(node_rank, int) or node_rank < 0:
             self.respond_with_error(client_id, f"Missing or invalid 'node-rank' in request: '{node_rank}'")
+            return client_id, None
+
+        # Nodes of a previous job generation may still be alive and talk to us if we reuse the same IP:port
+        if self.generation is not None and (req_generation := req.get("generation")) != self.generation:
+            self.respond_with_error(client_id, f"Rejecting '{req.get('request')}' request from Node '{node_rank}' client_id={client_id.hex()} "
+                                               f"with generation '{req_generation}', expected '{self.generation}' (Node from a different job generation?)")
             return client_id, None
 
         if (rec_req := req.get("request")) != req_type:
@@ -402,8 +410,9 @@ class Coordinator(object):
         port = config["master-port"]
         transport = "tcp"
         listen_adr = f"{transport}://0.0.0.0:{port}"
-        logging.info(f"Starting Coordinator on {listen_adr}")
-        self.socket = ZMQAsyncServer(listen_adr)
+        generation = config.get("generation")
+        logging.info(f"Starting Coordinator on {listen_adr}, generation={generation if generation is not None else '<not set, not validated>'}")
+        self.socket = ZMQAsyncServer(listen_adr, generation)
         self.registered_adr = f"{transport}://{platform_api.get_my_ip()}:{port}"
 
         # Map SIGTERM to KeyboardInterrupt exception, SIGINT already raises KeyboardInterrupt
