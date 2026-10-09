@@ -61,30 +61,50 @@ class _FileHandler(FileSystemEventHandler):
             self.observer.stop()
 
 
-def wait_for_file(expected_filename):
-    logging.info(f"Checking if file '{expected_filename}' exists (quick) ...")
-    if os.path.exists(expected_filename):
-        logging.info(f"File '{expected_filename}' already exists (quick).")
-        return
+# inotify events can silently stop arriving (e.g. when the watched directory is re-mounted
+# underneath us), so the watch is re-created and the file is checked explicitly this often.
+WATCH_TIMEOUT = 15 * 60
 
-    observer = Observer()
-    event_handler = _FileHandler(expected_filename, observer)
-    observer.schedule(event_handler, Path(expected_filename).parent, recursive=False)
-    observer.start()
 
-    # For simulating race condition during testing:
-    # logging.debug("Sleeping after starting observer...")
-    # time.sleep(5)
-    # logging.debug("Waking up")
+def wait_for_file(expected_filename, watch_timeout: int = WATCH_TIMEOUT):
+    """Blocks until `expected_filename` exists.
 
-    # Check if the file was created after the first check but before we've started the observer
-    logging.info(f"Checking if file '{expected_filename}' exists (safe) ...")
-    if os.path.exists(expected_filename):
-        logging.info(f"File '{expected_filename}' already exists (safe).")
+    Uses an inotify watch on the file's directory, re-created every `watch_timeout`
+    seconds together with an explicit existence check, so a file that the watch
+    missed is still picked up.
+    """
+    while True:
+        logging.info(f"Checking if file '{expected_filename}' exists (quick) ...")
+        if os.path.exists(expected_filename):
+            logging.info(f"File '{expected_filename}' already exists (quick).")
+            return
+
+        observer = Observer()
+        event_handler = _FileHandler(expected_filename, observer)
+        observer.schedule(event_handler, Path(expected_filename).parent, recursive=False)
+        observer.start()
+
+        # For simulating race condition during testing:
+        # logging.debug("Sleeping after starting observer...")
+        # time.sleep(5)
+        # logging.debug("Waking up")
+
+        # Check if the file was created after the first check but before we've started the observer
+        logging.info(f"Checking if file '{expected_filename}' exists (safe) ...")
+        if os.path.exists(expected_filename):
+            logging.info(f"File '{expected_filename}' already exists (safe).")
+            observer.stop()
+
+        logging.debug("Waiting for observer to stop ...")
+        observer.join(watch_timeout)
+        # Observer thread still alive => join() timed out; stopped => file found.
+        if not observer.is_alive():
+            return
+
+        # Timed out. The watch may be stale; the next iteration checks the file explicitly first.
         observer.stop()
-
-    logging.debug(f"Waiting for observer to stop ...")
-    observer.join()
+        observer.join()
+        logging.info(f"File '{expected_filename}' did not appear within {watch_timeout} s, re-creating the watch.")
 
 
 def start_regex_file_watcher(path, regex_pattern, notifications_queue, expect_dirs):
