@@ -26,6 +26,9 @@ RUN mkdir local repl backup
 
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
+# CVE-2026-6357 / CVE-2025-8869: pip 25.0.1 bundled in ensurepip. Python 3.12
+# never bundles a newer pip; the installed pip is upgraded above.
+RUN rm -f /usr/local/lib/python3.*/ensurepip/_bundled/pip-*.whl
 
 COPY rpc/*.py rpc/
 COPY platform_api/*.py platform_api/
