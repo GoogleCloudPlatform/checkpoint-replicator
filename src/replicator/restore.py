@@ -245,12 +245,20 @@ def run(config, master):
 
     restore_step = resp["restore-version"]
     restore_backup = resp.get("restore-backup")
+    restore_forced = resp.get("restore-forced", False)
     replication_peers = resp["replication-peers"]
 
     # overwrite the number of peers per node as coordinator may provide less than we wanted
     config["peers-per-node"] = len(replication_peers)
 
     if not isinstance(restore_step, int):
+        if restore_forced:
+            # The operator forced a restore from a specific backup and it is not possible, so there is nothing to
+            # fall back to. Starting the job from scratch (and garbage collecting local checkpoints) is not acceptable
+            # either, so fail the replicator instead: repl.py logs the exception as CRITICAL, which writes
+            # replicator.failed and stops the training job.
+            raise RuntimeError(f"Cannot restore: {restore_step}")
+
         logging.error(f"Cannot restore, no checkpoint to restore from: {restore_step}")
 
         # crete empty .prerestore file

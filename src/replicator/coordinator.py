@@ -177,6 +177,9 @@ class RestoreDB:
         # backup name we are restoring from, or None if we are not restoring from backup
         self.restore_backup_name = None
 
+        # why a forced restore failed (sent to the Nodes, which fail instead of restoring nothing), or None
+        self.restore_failure: str | None = None
+
         # data hash -> deque(NodeRank that has this hash) mapping
         self.hash_to_node_ranks = None
 
@@ -483,8 +486,11 @@ class Coordinator(object):
         else:
             if backup_name:
                 logging.warning(f"Restoring from forced backup '{backup_name}'")
-                backup_list = [backup_name]
-                backup_name = None # reset it in case it's invalid
+                if Path(Volume.Backup.value, backup_name).is_dir():
+                    backup_list = [backup_name]
+                else:
+                    logging.warning(f"Forced backup '{backup_name}' does not exist")
+                    backup_list = []
             else:
                 logging.warning("No valid checkpoints found in the cluster, trying backups")
                 backup_list = get_backup_list()
@@ -504,6 +510,14 @@ class Coordinator(object):
 
             if best_cp is not None:
                 logging.info(f"We will restore checkpoint {best_cp} from backup {backup_name}")
+            elif backup_name:
+                # Only a forced restore gets here: the operator asked for this exact backup, so there is nothing to
+                # fall back to, and starting the job from scratch is not acceptable either. The failure is sent to
+                # all Nodes, which fail loudly (replicator.failed) instead of restoring nothing.
+                restore_db.restore_failure = (f"Forced restore from backup '{backup_name}' listed in "
+                                              f"{FORCED_BACKUP_RESTORE_FILE_NAME} failed: backup is missing or incomplete")
+                logging.critical(restore_db.restore_failure)
+                backup_name = None  # we are not restoring from it
             else:
                 logging.error("No valid checkpoints found anywhere")
 
@@ -827,7 +841,13 @@ class Coordinator(object):
             node_rank = req_or_node_rank
             req = restore_db.requests[restore_db.node_rank_to_client_id[node_rank]]
 
-        resp = {"restore-version": restore_db.restore_cp or "No valid checkpoints found"}
+        if restore_db.restore_cp is not None:
+            resp = {"restore-version": restore_db.restore_cp}
+        elif restore_db.restore_failure is not None:
+            # a forced restore failed: the Node must fail instead of starting the job without a checkpoint
+            resp = {"restore-version": restore_db.restore_failure, "restore-forced": True}
+        else:
+            resp = {"restore-version": "No valid checkpoints found"}
 
         resp["replication-peers"] = self._get_replication_peers_for_node(req, restore_db)
 
