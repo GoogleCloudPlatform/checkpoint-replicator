@@ -506,7 +506,8 @@ class Coordinator(object):
                         backup_name = backup
                         break
 
-                if best_cp:
+                # step 0 is a valid checkpoint, so compare against None
+                if best_cp is not None:
                     break
 
             if best_cp is not None:
