@@ -171,14 +171,14 @@ def copy_meta_and_data_files(meta_file, dest: str, copy_data, verify_data):
         atomic_copy_file(src_data_file, dest, max_workers=framework.get_replication_workers())
     elif verify_data:
         if not src_data_file.exists():
-            logging.error(err := f"Missing source .data {src_data_file} referenced by .meta {meta_file}")
+            logging.critical(err := f"Missing source .data {src_data_file} referenced by .meta {meta_file}")
             raise FileNotFoundError(err)
 
         dst_data_file = Path(dest, hash).with_suffix(".data")
         if dst_data_file.exists():
             logging.info(f"As expected .data {src_data_file} referenced by .meta {meta_file} is found at {dst_data_file}")
         else:
-            logging.error(err := f"Missing destination .data {dst_data_file} referenced by .meta {meta_file}")
+            logging.critical(err := f"Missing destination .data {dst_data_file} referenced by .meta {meta_file}")
             raise FileNotFoundError(err)
 
 
