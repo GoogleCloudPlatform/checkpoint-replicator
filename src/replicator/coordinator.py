@@ -222,19 +222,20 @@ class RestoreDB:
         self.global_data = backup_data
 
 
-    def infer_missing_meta(self, step: int):
+    def validate_and_infer_missing_meta(self, step: int) -> bool:
         dp_partitions = self.config.get("assume-data-parallelism")
         if not dp_partitions or dp_partitions <= 1:
             logging.info("No .meta inference if no data parallelism, or only one group")
-            return
+            return True
 
         node_count = self.config["nodes"]
         if (node_count % dp_partitions) != 0:
             logging.error(f"Number of Nodes {node_count} is not divisible by assume-data-parallelism {dp_partitions} = {node_count / dp_partitions}")
-            return
+            return False
 
         dp_partition_size = node_count // dp_partitions
         step_meta = self.global_meta[step]
+        valid = True
 
         # Conceptually we map the flat 1D list of NodeRanks onto a 2D grid:
         # * Rows represent data-parallel replicas (partitions)
@@ -253,6 +254,8 @@ class RestoreDB:
             # node ranks that need to be inferred
             infer_ranks = []
 
+            column_valid = True
+
             # Now iterate over rows
             for row in range(dp_partitions):
                 node_rank = row * dp_partition_size + col
@@ -267,24 +270,24 @@ class RestoreDB:
                 elif node_hashes != column_hashes:
                     logging.error(f"Conflicting meta for step={step}, column={col}, row={row}, node_rank={node_rank} "
                                   f"is set to {node_hashes}, but previous row(s) were set to {column_hashes}")
-                    # this column cannot be inferred, but maybe all values are set and no inference is required,
-                    # so break will proceed to the next column.
-                    # THIS IS STILL AN ERROR, as data parallelism assumption is not satisfied
-                    # but we'll try to proceed anyway, break will proceed to the next column
-                    break
-            else: # this is for/else block, only executed if for loop did not break and finished normally
-                if infer_ranks:
-                    if column_hashes is None:
-                        logging.warning(f"Cannot infer missing meta for step={step}, entire column={col}, nodes={infer_ranks}")
-                        # there is no point in continuing inference for this entire step, as validation will fail later anyway,
-                        # but if other "smarts" are added in the future, this may need to be replaced with else
-                        return
+                    column_valid = False
+                    valid = False
 
+            if not column_valid:
+                continue
+
+            if infer_ranks:
+                if column_hashes is None:
+                    logging.warning(f"Cannot infer missing meta for step={step}, entire column={col}, nodes={infer_ranks}")
+                    valid = False
+                else:
                     # infer hashes for nodes missing meta
                     for node_rank in infer_ranks:
                         step_meta[node_rank] = column_hashes.copy()
 
                     logging.info(f"Inferred missing meta for step={step} column={col} for nodes {infer_ranks} to be {column_hashes}")
+
+        return valid
 
 
     def validate_checkpoint(self, step: int) -> bool:
@@ -476,8 +479,7 @@ class Coordinator(object):
             # look for in-cluster checkpoint
             restore_db.build_global_state_from_requests()
             for step in sorted(restore_db.global_meta.keys(), reverse=True):
-                restore_db.infer_missing_meta(step)
-                if restore_db.validate_checkpoint(step):
+                if restore_db.validate_and_infer_missing_meta(step) and restore_db.validate_checkpoint(step):
                     best_cp = step
                     break
 
@@ -499,8 +501,7 @@ class Coordinator(object):
                 restore_db.load_global_state_from_backup(backup)
                 # normally backup should have only one step
                 for step in sorted(restore_db.global_meta.keys(), reverse=True):
-                    restore_db.infer_missing_meta(step)
-                    if restore_db.validate_checkpoint(step):
+                    if restore_db.validate_and_infer_missing_meta(step) and restore_db.validate_checkpoint(step):
                         best_cp = step
                         backup_name = backup
                         break
@@ -753,50 +754,61 @@ class Coordinator(object):
         while True:
             requests = self.socket.gather_requests("sync", node_count)
 
-            # at this point we know all Nodes have restored from forced backup (if it was requested),
-            # and saved a fresher checkpoint, so it's OK to delete forced restore file if it exists
-            if forced_backup_restore_file:
-                if forced_backup_restore_file.exists():
-                    logging.warning(f"Deleting forced restore file {forced_backup_restore_file}")
-                    forced_backup_restore_file.unlink()
-
-                # only check once
-                forced_backup_restore_file = None
-
             cur_step = None
+            data_mismatch_nodes = []
             for req in requests.values():
                 if cur_step is None:
                     cur_step = req["replicated-step"]
                 else:
                     assert cur_step == req["replicated-step"]
+                if req.get("data-mismatch"):
+                    data_mismatch_nodes.append(req["node-rank"])
 
-            resp = {
-                "replicated-step": cur_step
-            }
+            if data_mismatch_nodes:
+                data_mismatch_nodes.sort()
+                logging.critical(f"Checkpoint data mismatch for step {cur_step} on Nodes {data_mismatch_nodes}")
+                resp = {
+                    "replicated-step": cur_step,
+                    "data-mismatch": True,
+                }
+            else:
+                # at this point we know all Nodes have restored from forced backup (if it was requested),
+                # and saved a fresher checkpoint, so it's OK to delete forced restore file if it exists
+                if forced_backup_restore_file:
+                    if forced_backup_restore_file.exists():
+                        logging.warning(f"Deleting forced restore file {forced_backup_restore_file}")
+                        forced_backup_restore_file.unlink()
 
-            trigger_backup = backup_policy.should_backup(cur_step)
+                    # only check once
+                    forced_backup_restore_file = None
 
-            if trigger_backup or (DEBUG_BACKUP and cur_step is not None and cur_step % 2):
-                nodes_running_backup = set()
-                for req in requests.values():
-                    if req["backup-running"]:
-                        nodes_running_backup.add(req["node-rank"])
+                resp = {
+                    "replicated-step": cur_step
+                }
 
-                # request backup if it's empty
-                if not nodes_running_backup:
-                    backup_policy.backup_started(cur_step)
+                trigger_backup = backup_policy.should_backup(cur_step)
 
-                    utc_now = datetime.datetime.now(datetime.timezone.utc)
-                    backup_dir = build_backup_dir(utc_now)
+                if trigger_backup or (DEBUG_BACKUP and cur_step is not None and cur_step % 2):
+                    nodes_running_backup = set()
+                    for req in requests.values():
+                        if req["backup-running"]:
+                            nodes_running_backup.add(req["node-rank"])
 
-                    logging.info(f"Requesting Nodes to backup step {cur_step} to {backup_dir}")
+                    # request backup if it's empty
+                    if not nodes_running_backup:
+                        backup_policy.backup_started(cur_step)
 
-                    dest = Path(Volume.Backup.value, backup_dir)
-                    os.makedirs(dest, exist_ok=True)
+                        utc_now = datetime.datetime.now(datetime.timezone.utc)
+                        backup_dir = build_backup_dir(utc_now)
 
-                    resp["backup-dir"] = backup_dir
-                else:
-                    logging.error(f"Backup should be requested for step {cur_step}, but skipping it because some Nodes are still running previous backup: {nodes_running_backup}")
+                        logging.info(f"Requesting Nodes to backup step {cur_step} to {backup_dir}")
+
+                        dest = Path(Volume.Backup.value, backup_dir)
+                        os.makedirs(dest, exist_ok=True)
+
+                        resp["backup-dir"] = backup_dir
+                    else:
+                        logging.error(f"Backup should be requested for step {cur_step}, but skipping it because some Nodes are still running previous backup: {nodes_running_backup}")
 
             logging.info(f"Sending 'sync' responses to all Nodes")
 

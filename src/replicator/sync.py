@@ -32,6 +32,10 @@ from watchdog.events import *
 DEBUG = False
 
 
+class DataMismatchError(FileNotFoundError):
+    pass
+
+
 def debug_pause(msg):
     if DEBUG:
         input(msg)
@@ -172,14 +176,14 @@ def copy_meta_and_data_files(meta_file, dest: str, copy_data, verify_data):
     elif verify_data:
         if not src_data_file.exists():
             logging.critical(err := f"Missing source .data {src_data_file} referenced by .meta {meta_file}")
-            raise FileNotFoundError(err)
+            raise DataMismatchError(err)
 
         dst_data_file = Path(dest, hash).with_suffix(".data")
         if dst_data_file.exists():
             logging.info(f"As expected .data {src_data_file} referenced by .meta {meta_file} is found at {dst_data_file}")
         else:
             logging.critical(err := f"Missing destination .data {dst_data_file} referenced by .meta {meta_file}")
-            raise FileNotFoundError(err)
+            raise DataMismatchError(err)
 
 
 def wait_for_dest_to_be_ready(config, cur_step, peer_dir):
@@ -195,19 +199,37 @@ def wait_for_dest_to_be_ready(config, cur_step, peer_dir):
         time.sleep(0.3)
 
 
-def wait_for_global_replication(config, master, cur_step, backup_running : bool):
+def wait_for_global_replication(config, master, cur_step, backup_running: bool, data_mismatch: bool):
     req = {
         **util.new_coordinator_request(config, "sync"),
         "replicated-step": cur_step,
         "backup-running": backup_running
     }
+    if data_mismatch:
+        req["data-mismatch"] = True
     logging.info(f"Sending sync request:\n{pprint.pformat(req, width=120, compact=True)}")
     resp = util.send_coordinator_request(master, req)
     logging.info(f"Received sync response:\n{pprint.pformat(resp, width=120, compact=True)}")
 
     replicated_step = resp["replicated-step"]
     backup_dir = resp.get("backup-dir")
-    return replicated_step, backup_dir
+    data_mismatch_ret = resp.get("data-mismatch", False)
+    # `not A or B` encodes implication `A => B`: if we sent data_mismatch, data_mismatch_ret must be True
+    assert not data_mismatch or data_mismatch_ret, "Expected 'data-mismatch' in Coordinator response"
+    return replicated_step, backup_dir, data_mismatch_ret
+
+
+def delete_local_checkpoint(config, step: int):
+    logging.info(f"Deleting local checkpoint for step {step}")
+    meta_files_mask = build_checkpoint_filename(
+        config["job-name"], step, "*", "*", "meta", volume=Volume.Local)
+    for meta_file in glob.glob(meta_files_mask):
+        with open(meta_file, "r") as f:
+            hash = f.read()
+        data_file = Path(meta_file).with_name(hash).with_suffix(".data")
+        logging.info(f"Deleting {meta_file} -> {data_file}")
+        util.delete_file_or_dir(data_file)
+        util.delete_file_or_dir(meta_file)
 
 
 def garbage_collect_local_storage(config, keep_steps: set[int], *, keep_node_rank = None):
@@ -284,7 +306,7 @@ def copy_files_in_parallel(op, executor, step, source_meta_files, dest_dir, copy
 
     futures = [executor.submit(
         copy_meta_and_data_files, f, dest_dir, copy_data, verify_data) for f in source_meta_files]
-    util.wait_futures(futures, f"{op} for step {step} to {dest_dir}")
+    failures = util.wait_futures(futures, f"{op} for step {step} to {dest_dir}")
 
     # We need backup to be still running when next step checkpoint is saved to validate
     # various GC behaviours, including deleting the just-saved step in assume-data-parallelism case
@@ -292,6 +314,8 @@ def copy_files_in_parallel(op, executor, step, source_meta_files, dest_dir, copy
         logging.info("Sleeping for 10 seconds")
         time.sleep(10)
         logging.info("Exiting backup thread")
+
+    return failures
 
 
 def hash_and_wrap_into_meta(save_file_or_dir, hash_func):
@@ -379,6 +403,7 @@ def run(config, master):
 
             logging.info(f"All .save files are hashed for step {cur_step}")
 
+            data_mismatch = False
             with MetricManager().node_operations_latency({"method_name": "CheckpointReplicationTotal", "framework": ""}):
                 for peer in repl_dirs(config):
                     logging.info(
@@ -389,8 +414,10 @@ def run(config, master):
                         wait_for_dest_to_be_ready(config, cur_step, peer)
                         # in case of data parallelism we replicate out only tiny .meta files
                         copy_data = config.get("assume-data-parallelism") is None
-                        copy_files_in_parallel(
+                        failures = copy_files_in_parallel(
                             "replication", repl_executor, cur_step, meta_files, peer, copy_data=copy_data, verify_data=True)
+                        if any(isinstance(f.exception(), DataMismatchError) for f in failures):
+                            data_mismatch = True
 
             # first check if the previous backup has finished
             if backup_thread is not None and not backup_thread.is_alive():
@@ -404,7 +431,12 @@ def run(config, master):
                 logging.info(f"Backup is not running")
 
             # notify Coordinator, and get confirmation that checkpoint is globally replicated
-            replicated_step, backup_dir = wait_for_global_replication(config, master, cur_step, backup_running = bool(backup_thread))
+            replicated_step, backup_dir, data_mismatch = wait_for_global_replication(
+                config, master, cur_step, backup_running=bool(backup_thread), data_mismatch=data_mismatch)
+
+            if data_mismatch:
+                delete_local_checkpoint(config, cur_step)
+                raise RuntimeError(f"Checkpoint data mismatch for step {cur_step}")
 
             logging.info(
                 f"All files were replicated globally for step {replicated_step}")
