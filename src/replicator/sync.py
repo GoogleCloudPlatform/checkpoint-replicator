@@ -138,14 +138,6 @@ def atomic_copy_file(file_or_dir, dest, max_workers, force=False):
     except FileExistsError as e:
         logging.info(
             f"{'Dir' if src_is_dir else 'File'} {e.filename} already exists, skipping copy (.tmp file exists): {e}")
-    except OSError as e:
-        # on GCSFuse volume os.mkdir fails with OSError(5) if dir already exists
-        if e.errno == 5:
-            logging.info(
-                f"{'Dir' if src_is_dir else 'File'} {e.filename} already exists (errno 5), skipping copy (.tmp file exists): {e}")
-        else:
-            logging.error(f"OSError: Failed to copy {file_or_dir} to {dst_name}: {type(e)} {e}")
-            raise
     except Exception as e:
         logging.error(f"Failed to copy {file_or_dir} to {dst_name}: {type(e)} {e}")
         raise
