@@ -111,6 +111,10 @@ def start_regex_file_watcher(path, regex_pattern, notifications_queue, expect_di
     """Starts a file watcher that monitors a directory for new files or directories matching a regex pattern.
     Full paths of created files/dirs are placed into notifications_queue.
 
+    The watch only reports entries that appear after it starts, so (like `wait_for_file`) matching
+    entries that already exist are queued too, right after the watch starts. An entry created in
+    between is queued twice; consumers read the queue with `get_deduplicated_notification`.
+
     Args:
         path: The directory path to watch.
         regex_pattern: The regex pattern to match against file or directory names.
@@ -146,7 +150,42 @@ def start_regex_file_watcher(path, regex_pattern, notifications_queue, expect_di
     observer.schedule(event_handler, path, recursive=False)
     observer.start()
 
+    # Queue entries that already existed when the watch started: e.g. Orbax saves step 0 as soon as
+    # `.restore` releases it, possibly before sync starts watching. Listing after the watch starts
+    # can't miss an entry, but one created in between is queued twice (see
+    # `get_deduplicated_notification`).
+    existing = []
+    with os.scandir(path) as entries:
+        for e in entries:
+            if not re.match(regex_pattern, e.path):
+                continue
+            # symlinks are neither dirs nor files here: the restored step is a symlink renamed from `.restore`
+            if e.is_dir(follow_symlinks=False):
+                if expect_dirs:
+                    existing.append(e)
+            elif e.is_file(follow_symlinks=False):
+                if not expect_dirs:
+                    existing.append(e)
+    for e in sorted(existing, key=lambda e: e.stat(follow_symlinks=False).st_mtime_ns):
+        logging.debug(f"Found existing: {e.path}")
+        notifications_queue.put(e.path)
+
     return observer
+
+
+def get_deduplicated_notification(notifications_queue):
+    """Returns the next notification from `start_regex_file_watcher`, skipping duplicates.
+
+    An entry created right after the watch starts is queued twice: by the watch and by the listing
+    in `start_regex_file_watcher`. The consumer moves the entry away when it handles the first
+    notification, so the second one points to a path that no longer exists and is skipped. A path
+    that was re-created in the meantime exists again and is returned.
+    """
+    while True:
+        path = notifications_queue.get()
+        if os.path.exists(path):
+            return path
+        logging.debug(f"{path} no longer exists, skipping duplicate notification")
 
 
 if __name__ == "__main__":

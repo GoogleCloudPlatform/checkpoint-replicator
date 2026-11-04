@@ -16,7 +16,7 @@ import logging
 
 import util
 from file_naming import *
-from file_watching import start_regex_file_watcher
+from file_watching import get_deduplicated_notification, start_regex_file_watcher
 
 
 def start_file_watcher(config, file_notifications):
@@ -31,7 +31,7 @@ def wait_for_local_save(config, file_notifications):
     files = set()
     cur_step = None
     while len(files) < config["workers-per-node"]:
-        file = file_notifications.get()
+        file = get_deduplicated_notification(file_notifications)
         logging.info(f"Registered: {file}")
         (step, node, worker) = parse_checkpoint_filename(file, config["job-name"])
         logging.debug(

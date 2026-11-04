@@ -24,7 +24,7 @@ import merkle
 from metrics_manager import QUICK_BUCKETS, MetricManager
 import util
 from file_naming import *
-from file_watching import start_regex_file_watcher
+from file_watching import get_deduplicated_notification, start_regex_file_watcher
 from time_block import TimeBlock
 
 
@@ -38,7 +38,7 @@ def start_file_watcher(config, file_notifications):
 
 # when making changes, keep in mind that torch_distributed uses this function as well
 def _wait_for_local_save(config, pattern, file_notifications):
-    dir = file_notifications.get()
+    dir = get_deduplicated_notification(file_notifications)
     logging.info(f"Registered: {dir}")
     step = int(re.match(pattern, dir).group(1))
     logging.debug(f"Detected checkpoint dir for step={step}")
