@@ -191,7 +191,7 @@ def wait_for_dest_to_be_ready(config, cur_step, peer_dir):
         time.sleep(0.3)
 
 
-def wait_for_global_replication(config, master, cur_step, backup_running: bool, data_mismatch: bool):
+def wait_for_global_replication(config, master, cur_step, backup_running: bool, data_mismatch: bool, backup_requested: bool):
     req = {
         **util.new_coordinator_request(config, "sync"),
         "replicated-step": cur_step,
@@ -199,6 +199,8 @@ def wait_for_global_replication(config, master, cur_step, backup_running: bool, 
     }
     if data_mismatch:
         req["data-mismatch"] = True
+    if backup_requested:
+        req["backup-requested"] = True
     logging.info(f"Sending sync request:\n{pprint.pformat(req, width=120, compact=True)}")
     resp = util.send_coordinator_request(master, req)
     logging.info(f"Received sync response:\n{pprint.pformat(resp, width=120, compact=True)}")
@@ -388,6 +390,11 @@ def run(config, master):
         while True:
             files, cur_step = framework.wait_for_local_save(config, file_notifications)
 
+            # the training job can ask for this step to be backed up, regardless of the backup interval
+            backup_requested = framework.backup_requested(files)
+            if backup_requested:
+                logging.info(f"Training job requested a backup of step {cur_step}")
+
             logging.info(f"Hashing files for step {cur_step}")
             meta_files = [repl_executor.submit(hash_and_wrap_into_meta, f, framework.hash_file) for f in files]
             del files
@@ -424,7 +431,8 @@ def run(config, master):
 
             # notify Coordinator, and get confirmation that checkpoint is globally replicated
             replicated_step, backup_dir, data_mismatch = wait_for_global_replication(
-                config, master, cur_step, backup_running=bool(backup_thread), data_mismatch=data_mismatch)
+                config, master, cur_step, backup_running=bool(backup_thread), data_mismatch=data_mismatch,
+                backup_requested=backup_requested)
 
             if data_mismatch:
                 delete_local_checkpoint(config, cur_step)

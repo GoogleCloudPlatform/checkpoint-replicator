@@ -29,6 +29,7 @@ import platform_api
 import util
 import zmq
 from file_naming import *
+from metrics_manager import MetricManager
 from restore import list_data_files, list_meta_files
 
 
@@ -741,6 +742,7 @@ class Coordinator(object):
     # "node-rank": 0
     # "replicated-step": 5
     # "backup-running": false
+    # "backup-requested": true   (only when the training job asked to back up this step)
     def sync(self):
         node_count = self.config["nodes"]  # the number of Nodes we expect
         backup_interval_minutes = self.config.get("backup-interval-minutes")
@@ -756,18 +758,20 @@ class Coordinator(object):
             requests = self.socket.gather_requests("sync", node_count)
 
             cur_step = None
-            data_mismatch_nodes = []
+            data_mismatch_nodes = set()
+            backup_requested_nodes = set()
             for req in requests.values():
                 if cur_step is None:
                     cur_step = req["replicated-step"]
                 else:
                     assert cur_step == req["replicated-step"]
                 if req.get("data-mismatch"):
-                    data_mismatch_nodes.append(req["node-rank"])
+                    data_mismatch_nodes.add(req["node-rank"])
+                if req.get("backup-requested"):
+                    backup_requested_nodes.add(req["node-rank"])
 
             if data_mismatch_nodes:
-                data_mismatch_nodes.sort()
-                logging.critical(f"Checkpoint data mismatch for step {cur_step} on Nodes {data_mismatch_nodes}")
+                logging.critical(f"Checkpoint data mismatch for step {cur_step} on Nodes {sorted(data_mismatch_nodes)}")
                 resp = {
                     "replicated-step": cur_step,
                     "data-mismatch": True,
@@ -789,6 +793,17 @@ class Coordinator(object):
 
                 trigger_backup = backup_policy.should_backup(cur_step)
 
+                # the training job can ask for a backup of this step; all Nodes save the same step with the same
+                # arguments, so they should all ask, but one is enough
+                if backup_requested_nodes:
+                    if len(backup_requested_nodes) == len(requests):
+                        logging.info(f"Training job requested a backup of step {cur_step}")
+                    else:
+                        dissenting_nodes = {req["node-rank"] for req in requests.values()} - backup_requested_nodes
+                        logging.error(f"Backup of step {cur_step} was requested by Nodes {sorted(backup_requested_nodes)} "
+                                      f"but not by Nodes {sorted(dissenting_nodes)}, backing it up anyway")
+                    trigger_backup = True
+
                 if trigger_backup or (DEBUG_BACKUP and cur_step is not None and cur_step % 2):
                     nodes_running_backup = set()
                     for req in requests.values():
@@ -809,7 +824,13 @@ class Coordinator(object):
 
                         resp["backup-dir"] = backup_dir
                     else:
-                        logging.error(f"Backup should be requested for step {cur_step}, but skipping it because some Nodes are still running previous backup: {nodes_running_backup}")
+                        # the ramdisk holds only the step being backed up and the newest one, so a step cannot wait
+                        # for the running backup to finish; the training job must space explicit backups further
+                        # apart than a backup takes
+                        trigger = "explicit" if backup_requested_nodes else "periodic"
+                        MetricManager().backups_skipped().labels(trigger=trigger).inc()
+                        logging.error(f"Skipping {trigger} backup of step {cur_step} because some Nodes are still "
+                                      f"running the previous backup: {sorted(nodes_running_backup)}")
 
             logging.info(f"Sending 'sync' responses to all Nodes")
 

@@ -48,6 +48,11 @@ def wait_for_local_save(config, file_notifications):
     return files, cur_step
 
 
+def backup_requested(save_files) -> bool:
+    # PyTorch checkpoints carry no per-step directives for the replicator
+    return False
+
+
 def hash_file(save_file):
     hash, _size = util.file_digest(save_file)
     return hash

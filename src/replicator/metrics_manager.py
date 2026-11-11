@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from prometheus_client import Histogram, utils
+from prometheus_client import Counter, Histogram, utils
 import threading
 import time
 
 NODE_OPERATIONS_SECONDS="node_operations_seconds"
+# backups the Coordinator could not start because Nodes were still running the previous one,
+# labelled by what triggered them: "periodic" (backup interval) or "explicit" (requested by the training job)
+BACKUPS_SKIPPED_TOTAL="backups_skipped_total"
 
 FILE_BUCKETS = (
     1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 250.0, 500.0, 750.0, 1000.0, 1500.0, #25 min, maximum we can accept
@@ -92,6 +95,7 @@ class InterimTimerContextManager:
 
 class MetricManager:
     _histogram_instances = {}
+    _counter_instances = {}
     _lock = threading.Lock()
 
     def histogram_client(self, metric_name: str,
@@ -103,6 +107,16 @@ class MetricManager:
                 MetricManager._histogram_instances[metric_name] = Histogram(
                     name=metric_name, documentation=description, buckets=bucket, labelnames=labels)
             return MetricManager._histogram_instances[metric_name]
+
+    def counter_client(self, metric_name: str, description: str, labels=()) -> Counter:
+        with MetricManager._lock:
+            if metric_name not in MetricManager._counter_instances:
+                MetricManager._counter_instances[metric_name] = Counter(
+                    name=metric_name, documentation=description, labelnames=labels)
+            return MetricManager._counter_instances[metric_name]
+
+    def backups_skipped(self) -> Counter:
+        return self.counter_client(BACKUPS_SKIPPED_TOTAL, "backups skipped because the previous backup was still running", labels=["trigger"])
 
     def node_operations_latency(self, actual_labels: dict[str, str]) -> InterimTimerContextManager:
         return self.time_with_interim_emission(NODE_OPERATIONS_SECONDS, "capped latency for replicator operations", FILE_BUCKETS, FILE_BUCKET_TIMEOUT, actual_labels)

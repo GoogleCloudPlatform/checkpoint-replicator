@@ -36,6 +36,11 @@ def wait_for_local_save(config, file_notifications):
     return _wait_for_local_save(config, dir_pattern, file_notifications)
 
 
+def backup_requested(save_files) -> bool:
+    # PyTorch checkpoints carry no per-step directives for the replicator
+    return False
+
+
 def hash_file(save_dir):
     logging.warning(f"Hashing {save_dir} as a regular dir")
     hash, _size = merkle.dir_digest(save_dir)

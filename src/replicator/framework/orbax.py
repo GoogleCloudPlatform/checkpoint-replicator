@@ -53,6 +53,16 @@ def wait_for_local_save(config, file_notifications):
     return _wait_for_local_save(config, dir_pattern, file_notifications)
 
 
+# Orbax leaves this empty file in the step dir when the training job asked for the step to be backed up
+BACKUP_REQUESTED_FILE = "_BACKUP_REQUESTED"
+
+
+def backup_requested(save_files) -> bool:
+    # Orbax saves a single dir per Node
+    [save_dir] = save_files
+    return Path(save_dir, BACKUP_REQUESTED_FILE).is_file()
+
+
 def _find_checkpoint_subdir(save_dir):
     logging.debug(f"Looking for Orbax checkpoint subdir in {save_dir}")
     # list all dirs under save_dir looking for one containing file manifest.ocdbt
