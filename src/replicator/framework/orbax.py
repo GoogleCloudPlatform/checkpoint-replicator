@@ -80,7 +80,8 @@ def _find_checkpoint_subdir(save_dir):
 
 def _hash_key(kvs, key):
     v = kvs.read(key).result().value
-    v_hash = blake3(v, max_threads=blake3.AUTO).hexdigest()
+    # Throttling hashing speed on-purpose, as hashing too fast slows down training job.
+    v_hash = blake3(v, max_threads=1).hexdigest()
     return key, len(v), v_hash
 
 
